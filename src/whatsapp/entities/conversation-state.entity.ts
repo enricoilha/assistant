@@ -7,7 +7,11 @@ export enum ConversationState {
   LISTING_TASKS = 'listing_tasks',
   UPDATING_TASK = 'updating_task',
   DELETING_TASK = 'deleting_task',
-  SELECTING_TASK = 'selecting_task'
+  SELECTING_TASK = 'selecting_task',
+  // New intelligent conversation states
+  ANALYZING_REQUEST = 'analyzing_request',
+  WAITING_FOR_CLARIFICATION = 'waiting_for_clarification',
+  CONFIRMING_CONFLICT = 'confirming_conflict'
 }
 
 export interface TaskData {
@@ -26,4 +30,14 @@ export interface ConversationContext {
   selectedTaskId?: string;
   operation?: 'create' | 'read' | 'update' | 'delete';
   tasks?: any[];
+  hasConflict?: boolean;
+  pendingUpdate?: any;
+  lastAnalysis?: {
+    intent: string;
+    referencedTask?: {
+      id: string;
+      title?: string;
+    };
+    confidence: number;
+  };
 }

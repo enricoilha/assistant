@@ -226,3 +226,61 @@ alter table if exists public.conversation_states enable row level security;
 create policy "Service accounts can manage conversation states" on public.conversation_states
   using (true)
   with check (true);
+
+  -- Create conversation_history table
+CREATE TABLE IF NOT EXISTS public.conversation_history (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  phone_number TEXT NOT NULL,
+  messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL
+);
+
+-- Add index for phone number for faster queries
+CREATE INDEX IF NOT EXISTS conversation_history_phone_number_idx ON public.conversation_history (phone_number);
+
+-- Add index for updated_at to help with cleanup of old records
+CREATE INDEX IF NOT EXISTS conversation_history_updated_at_idx ON public.conversation_history (updated_at);
+
+-- Enable Row Level Security (RLS)
+ALTER TABLE IF EXISTS public.conversation_history ENABLE ROW LEVEL SECURITY;
+
+-- Add RLS policy to allow service account to manage history
+CREATE POLICY "Service accounts can manage conversation history" ON public.conversation_history
+  USING (true)
+  WITH CHECK (true);
+
+-- Add auto-update timestamp function (if not already exists)
+CREATE OR REPLACE FUNCTION public.update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Add trigger to automatically update the updated_at column
+DROP TRIGGER IF EXISTS update_conversation_history_updated_at ON public.conversation_history;
+CREATE TRIGGER update_conversation_history_updated_at
+BEFORE UPDATE ON public.conversation_history
+FOR EACH ROW EXECUTE PROCEDURE public.update_updated_at_column();
+
+-- Optional: Add a cleanup function to remove old conversation histories
+-- This can be called periodically via a cron job
+CREATE OR REPLACE FUNCTION public.cleanup_old_conversation_histories(days_to_keep INTEGER)
+RETURNS INTEGER AS $$
+DECLARE
+  deleted_count INTEGER;
+BEGIN
+  DELETE FROM public.conversation_history
+  WHERE updated_at < (NOW() - (days_to_keep || ' days')::INTERVAL);
+  
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Comment on table and columns for documentation
+COMMENT ON TABLE public.conversation_history IS 'Stores conversation history for the WhatsApp assistant';
+COMMENT ON COLUMN public.conversation_history.phone_number IS 'The WhatsApp phone number of the user';
+COMMENT ON COLUMN public.conversation_history.messages IS 'JSON array of message objects with role, content, and timestamp';

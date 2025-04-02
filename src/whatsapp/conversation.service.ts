@@ -131,4 +131,59 @@ export class ConversationService {
       lastUpdateTime: new Date(),
     };
   }
+
+  // Save conversation history to database (new method)
+  async saveConversationHistory(phoneNumber: string, messages: any[]): Promise<void> {
+    try {
+      // Create a new record in conversation_history table
+      const now = new Date().toISOString();
+      
+      const { error } = await this.supabaseService.client
+        .from('conversation_history')
+        .insert([{
+          phone_number: phoneNumber,
+          messages: messages,
+          updated_at: now,
+          created_at: now
+        }]);
+        
+      if (error) {
+        this.logger.error(`Error saving conversation history: ${error.message}`, error);
+        throw error;
+      }
+      
+      this.logger.debug(`Successfully saved conversation history for ${phoneNumber}`);
+    } catch (error) {
+      this.logger.error(`Error in saveConversationHistory: ${error.message}`, error.stack);
+      // Don't throw - conversation history is non-critical
+    }
+  }
+  
+  // Get conversation history from database (new method)
+  async getConversationHistory(phoneNumber: string): Promise<any[]> {
+    try {
+      const { data, error } = await this.supabaseService.client
+        .from('conversation_history')
+        .select('messages')
+        .eq('phone_number', phoneNumber)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+        
+      if (error) {
+        if (error.code === 'PGRST116') {
+          // No history found, return empty array
+          return [];
+        }
+        
+        this.logger.error(`Error fetching conversation history: ${error.message}`, error);
+        throw error;
+      }
+      
+      return data?.messages || [];
+    } catch (error) {
+      this.logger.error(`Error in getConversationHistory: ${error.message}`, error.stack);
+      return [];
+    }
+  }
 }
