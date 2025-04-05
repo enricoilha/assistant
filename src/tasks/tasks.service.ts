@@ -26,6 +26,7 @@ export class TasksService {
         participants 
       } = createTaskDto;
 
+      
       // Insert task into the database
       const { data, error } = await this.supabaseService.client
         .from('tasks')
@@ -34,7 +35,7 @@ export class TasksService {
             user_id: userId,
             title,
             description,
-            scheduled_date: scheduledDate.toLocaleString('pt-BR'),
+            scheduled_date: scheduledDate.toLocaleDateString('pt-BR'),
             location,
             participants,
             status: 'pending',

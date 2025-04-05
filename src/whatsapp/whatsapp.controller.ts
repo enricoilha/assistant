@@ -52,10 +52,13 @@ export class WhatsappController {
 
   private isMessageEvent(body: any): boolean {
     try {
-      // Check if the webhook contains actual text messages
+      // Check if the webhook contains actual text messages or images with captions
       return body.entry?.some(entry => 
         entry.changes?.some(change => 
-          change.value?.messages?.some(message => message.type === 'text')
+          change.value?.messages?.some(message => 
+            message.type === 'text' || 
+            (message.type === 'image' && message.image?.caption)
+          )
         )
       ) || false;
     } catch (error) {
@@ -92,6 +95,7 @@ export class WhatsappController {
             const from = message.from;
             const buttonId = message.interactive.button_reply.id;
             const buttonTitle = message.interactive.button_reply.title;
+            const timestamp = change.value.metadata.timestamp;
             
             this.logger.log(`Received button response: ${buttonId} - ${buttonTitle} from ${from}`);
             
@@ -108,7 +112,13 @@ export class WhatsappController {
             // Process the button response as a regular message
             const userId = await this.whatsappService.getOrCreateUserByPhone(from);
             if (userId) {
-              await this.whatsappService.processConversation(phoneNumberId, from, userId, messageText);
+              await this.whatsappService.processConversation(
+                phoneNumberId, 
+                from, 
+                userId, 
+                messageText,
+                timestamp
+              );
             }
           }
         }

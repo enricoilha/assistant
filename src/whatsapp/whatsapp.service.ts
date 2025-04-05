@@ -6,7 +6,6 @@ import { TasksService } from '../tasks/tasks.service';
 import { lastValueFrom } from 'rxjs';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ConversationService } from './conversation.service';
-import { ConversationState, TaskData } from './entities/conversation-state.entity';
 
 /**
  * Armazena histórico de conversa recente para cada usuário
@@ -48,44 +47,46 @@ export class WhatsappService {
 
   async handleIncomingMessage(body: any): Promise<void> {
     try {
-      // Extract relevant information from WhatsApp webhook payload
-      const { entry } = body;
+      // Extract message data from webhook payload
+      const entry = body.entry[0];
+      const change = entry.changes[0];
+      const value = change.value;
+      const message = value.messages[0];
+      const from = message.from;
+      const phoneNumberId = value.metadata.phone_number_id;
+      const timestamp = message.timestamp;
       
-      if (!entry || entry.length === 0) {
-        this.logger.warn('No entry data in the webhook payload');
+      let messageText = '';
+      let isForwarded = false;
+
+      // Handle different message types
+      if (message.type === 'text' && message.text?.body) {
+        messageText = message.text.body;
+      } else if (message.type === 'image' && message.image?.caption) {
+        messageText = message.image.caption;
+      } else {
+        this.logger.warn(`Unsupported message type: ${message.type}`);
         return;
       }
-  
-      for (const entryData of entry) {
-        const { changes } = entryData;
-        
-        if (!changes || changes.length === 0) continue;
-  
-        for (const change of changes) {
-          const { value } = change;
-          
-          if (!value || !value.messages || value.messages.length === 0) continue;
-  
-          for (const message of value.messages) {
-            if (message.type !== 'text') continue;
-  
-            const phoneNumberId = value.metadata.phone_number_id;
-            const from = message.from; // This is the user's phone number
-            const messageText = message.text.body;
-            
-            // Get or create user by phone number
-            const userId = await this.getOrCreateUserByPhone(from);
-            
-            if (!userId) {
-              this.logger.error(`Failed to get or create user for phone: ${from}`);
-              continue;
-            }
-            
-            // Process the message as part of a conversation
-            await this.processConversation(phoneNumberId, from, userId, messageText);
-          }
-        }
+
+      // Check if message is forwarded
+      if (message.context?.forwarded) {
+        isForwarded = true;
+        messageText = `[Mensagem encaminhada] ${messageText}`;
       }
+      
+      this.logger.log(`Received message from ${from}: ${messageText}`);
+      
+      // Get or create user
+      const userId = await this.getOrCreateUserByPhone(from);
+      if (!userId) {
+        this.logger.error(`Could not get or create user for phone ${from}`);
+        return;
+      }
+      
+      // Process the message as part of a conversation, passing the timestamp
+      await this.processConversation(phoneNumberId, from, userId, messageText, timestamp);
+      
     } catch (error) {
       this.logger.error(`Error handling incoming message: ${error.message}`, error.stack);
     }
@@ -138,43 +139,31 @@ export class WhatsappService {
     }
   }
 
-  async processConversation(phoneNumberId: string, from: string, userId: string, messageText: string): Promise<void> {
+  async processConversation(
+    phoneNumberId: string,
+    from: string,
+    userId: string,
+    messageText: string,
+    timestamp: string
+  ): Promise<void> {
     try {
-      // Verificar comandos especiais primeiro
-      const lowerCaseMessage = messageText.toLowerCase().trim();
+      // Convert timestamp string to Date object
+      const messageDate = new Date(parseInt(timestamp) * 1000);
       
-      // Comandos de sistema que ainda mantemos para simplicidade
-      if (lowerCaseMessage === 'cancelar' || lowerCaseMessage === 'cancel' || lowerCaseMessage === '/cancelar') {
-        await this.handleCancelCommand(phoneNumberId, from);
-        return;
-      }
-      
-      if (lowerCaseMessage === 'reiniciar' || lowerCaseMessage === 'restart' || lowerCaseMessage === '/reiniciar') {
-        await this.handleRestartCommand(phoneNumberId, from);
-        return;
-      }
-      
-      if (lowerCaseMessage === 'ajuda' || lowerCaseMessage === 'help' || lowerCaseMessage === '/ajuda') {
-        await this.handleHelpCommand(phoneNumberId, from);
-        return;
-      }
-      
-      if (lowerCaseMessage === 'listar' || lowerCaseMessage === 'compromissos' || lowerCaseMessage === '/listar') {
-        await this.handleListCommand(phoneNumberId, from, userId);
-        return;
-      }
-      
-      // Para todos os outros casos, usamos a abordagem conversacional inteligente
-      await this.processMessageIntelligently(phoneNumberId, from, userId, messageText);
-      
+      // Process the message intelligently
+      await this.processMessageIntelligently(
+        phoneNumberId,
+        from,
+        userId,
+        messageText,
+        timestamp
+      );
     } catch (error) {
-      this.logger.error(`Erro no processamento da conversa: ${error.message}`, error.stack);
-      
-      // Mensagem de erro genérica
+      this.logger.error(`Erro no processamento da conversa: ${error.message}`);
       await this.sendMessage(
-        phoneNumberId, 
-        from, 
-        'Desculpe, ocorreu um erro ao processar sua mensagem. Tente novamente mais tarde.'
+        phoneNumberId,
+        from,
+        'Desculpe, tive um problema ao processar sua mensagem. Pode tentar novamente?'
       );
     }
   }
@@ -246,27 +235,32 @@ export class WhatsappService {
     phoneNumberId: string,
     from: string,
     userId: string,
-    messageText: string
+    messageText: string,
+    timestamp: string
   ): Promise<void> {
     try {
-      // Adicionar mensagem do usuário ao histórico
+      // Get conversation state
+      const conversationState = await this.conversationService.getConversationState(from);
+      
+      // Add message to conversation history
       await this.addToConversationHistory(from, 'user', messageText);
       
-      // Obter histórico recente
+      // Get user's tasks for context
+      const userTasks = await this.tasksService.findAllByUser(userId);
+      
+      // Get conversation history
       const history = await this.getConversationHistory(from);
       const conversationMessages = history.messages.map(m => `${m.role}: ${m.content}`);
       
-      // Obter compromissos do usuário
-      const userTasks = await this.tasksService.findAllByUser(userId);
-      
-      // Analisar a mensagem no contexto da conversa
+      // Analyze the conversation with OpenAI
       const analysis = await this.openaiService.analyzeConversation(
         messageText,
         conversationMessages,
-        userTasks
+        userTasks,
+        timestamp
       );
       
-      // Processar a intenção detectada
+      // Process the analysis based on intent
       let responseText = '';
       
       switch (analysis.intent) {
@@ -292,33 +286,28 @@ export class WhatsappService {
           
         case 'clarify':
         default:
-          // Usar a resposta sugerida pela análise
+          // Use the suggested response from analysis
           responseText = analysis.suggestedResponseText || 
             "Não entendi completamente. Você pode me dar mais detalhes?";
       }
       
-      // Enviar a resposta
+      // Send the response
       await this.sendMessage(phoneNumberId, from, responseText);
       
-      // Adicionar resposta ao histórico
+      // Add response to history
       await this.addToConversationHistory(from, 'assistant', responseText);
       
-      // Se a análise referenciou um compromisso específico, atualizar como último discutido
+      // If analysis referenced a specific task, update as last discussed
       if (analysis.referencedTask?.id) {
         const task = userTasks.find(t => t.id === analysis.referencedTask.id);
         if (task) {
           await this.updateLastDiscussedTask(from, task.id, task.title);
         }
       }
-    } catch (error) {
-      this.logger.error(`Erro no processamento inteligente: ${error.message}`, error.stack);
       
-      // Enviar mensagem de erro genérica
-      await this.sendMessage(
-        phoneNumberId,
-        from,
-        "Desculpe, tive um problema ao processar sua mensagem. Pode tentar novamente?"
-      );
+    } catch (error) {
+      this.logger.error(`Error processing message intelligently: ${error.message}`, error.stack);
+      await this.sendMessage(phoneNumberId, from, 'Desculpe, tive um problema ao processar sua mensagem. Pode tentar novamente?');
     }
   }
 
@@ -490,10 +479,37 @@ export class WhatsappService {
         return "Preciso de mais informações para criar o compromisso. Qual o título e quando será?";
       }
       
-      // Converter a data para UTC antes de salvar
-      const localDate = new Date(newTaskInfo.scheduledDate);
-      const utcDate = new Date(localDate.getTime() + (localDate.getTimezoneOffset() * 60000));
+      this.logger.log(`Data recebida do OpenAI: ${newTaskInfo.scheduledDate}`);
       
+      // Verificar se a data está no formato correto (YYYY-MM-DD)
+      // Se estiver no formato DD/MM/YYYY, converter para YYYY-MM-DD
+      let scheduledDate = newTaskInfo.scheduledDate;
+      if (typeof scheduledDate === 'string') {
+        if (scheduledDate.includes('/')) {
+          const parts = scheduledDate.split('/');
+          if (parts.length === 3) {
+            // Assumir formato DD/MM/YYYY
+            const day = parts[0];
+            const month = parts[1];
+            const year = parts[2];
+            scheduledDate = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+            this.logger.log(`Data convertida de DD/MM/YYYY para YYYY-MM-DD: ${scheduledDate}`);
+          }
+        } else if (scheduledDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          // Data no formato ISO sem hora (YYYY-MM-DD)
+          // Adicionar hora padrão (meio-dia) para evitar problemas de fuso horário
+          scheduledDate = `${scheduledDate}T12:00:00`;
+          this.logger.log(`Data ISO sem hora convertida para ISO com hora: ${scheduledDate}`);
+        }
+      }
+      
+      console.log('scheduledDate', scheduledDate);
+      // Converter a data para UTC antes de salvar
+      const localDate = new Date(scheduledDate);
+      this.logger.log(`Data convertida para objeto Date: ${localDate.toISOString()}`);
+      const utcDate = new Date(localDate.getTime() + (localDate.getTimezoneOffset() * 60000));
+      this.logger.log(`Data convertida para UTC: ${utcDate.toISOString()}`);
+
       // Criar o compromisso
       const taskData = {
         userId,

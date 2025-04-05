@@ -300,7 +300,7 @@ Exemplos:
           // For update messages, look specifically for new time indications
           const lowerMessage = message.toLowerCase();
           
-          // Patterns like "agora às 12h" or "será às 12h" or "não 13h, mas 12h"
+          // Patterns like "agora às 12h" or "será às 12h" or "não 13h, mas Y"
           const updateTimePatterns = [
             /agora\s+[àa]s?\s+(\d{1,2})[:.h](\d{0,2})/i,
             /ser[áa]\s+[àa]s?\s+(\d{1,2})[:.h](\d{0,2})/i,
@@ -394,6 +394,10 @@ Considerações importantes:
 
 4. PARTICIPANTES: "família", "equipe", "financeiro" são exemplos de participantes comuns
 
+5. DATAS: IMPORTANTE - Sempre interprete datas no formato brasileiro (DD/MM/AAAA). 
+   Por exemplo, "07/04" significa 7 de abril, não 4 de julho.
+   Se a mensagem mencionar "dia 07/04", isso significa 7 de abril.
+
 CERTIFIQUE-SE DE EXTRAIR O HORÁRIO CORRETAMENTE, ESPECIALMENTE PARA MENSAGENS DE ATUALIZAÇÃO.
 `;
   }
@@ -402,37 +406,37 @@ CERTIFIQUE-SE DE EXTRAIR O HORÁRIO CORRETAMENTE, ESPECIALMENTE PARA MENSAGENS D
    * Método especializado para análise conversacional completa
    */
   async analyzeConversation(
-    message: string, 
-    conversationHistory: string[], 
-    userTasks: any[]
+    message: string,
+    conversationHistory: string[],
+    userTasks: any[],
+    messageTimestamp: string
   ): Promise<any> {
     try {
       this.logger.log(`Analyzing conversation with message: "${message}"`);
       
-      // Formatar tarefas do usuário para o prompt
+      // Convert WhatsApp timestamp to Date
+      const messageDate = new Date(parseInt(messageTimestamp) * 1000);
+      
+      // Format tasks for the prompt
       const tasksFormatted = userTasks.map(task => {
         const date = new Date(task.scheduledDate);
         return {
           id: task.id,
           title: task.title,
           date: date.toISOString(),
-          formattedDate: date.toLocaleDateString('pt-BR', {
-            weekday: 'long',
-            day: 'numeric',
-            month: 'long',
-            hour: '2-digit',
-            minute: '2-digit'
-          }),
+          formattedDate: date.toLocaleDateString('pt-BR'),
           location: task.location,
           participants: task.participants,
           status: task.status
         };
       }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
       
-      // Construir o prompt com todo o contexto
+      // Build the prompt with all context
       const prompt = `
 Você é um assistente inteligente para gerenciamento de compromissos, como o JARVIS do Homem de Ferro.
 Analise a última mensagem do usuário considerando o histórico de conversa e os compromissos existentes.
+
+Data e hora da mensagem: ${messageDate.toLocaleString('pt-BR')}
 
 HISTÓRICO DE CONVERSA (mais recente por último):
 ${conversationHistory.map((msg, i) => `[${i+1}] ${msg}`).join('\n')}
@@ -480,6 +484,11 @@ DIRETRIZES IMPORTANTES:
 6. Em caso de dúvida sobre qual compromisso está sendo referenciado, dê preferência aos mais próximos no tempo.
 7. Entenda referências como "o almoço" como sendo provavelmente o próximo almoço agendado.
 8. Priorize entender intenções de atualização, como "O almoço será às 12h, não às 13h".
+9. Use a data e hora da mensagem como referência para interpretar expressões relativas como "amanhã", "hoje", "próxima semana", etc.
+10. Se o usuário encaminhar uma mensagem, considere que ele quer criar um novo compromisso.
+11. IMPORTANTE: Sempre interprete datas no formato brasileiro (DD/MM/AAAA). Por exemplo, "07/04" significa 7 de abril, não 4 de julho.
+12. CRÍTICO: Quando a mensagem mencionar "dia 07/04", isso significa 7 de abril, não 4 de julho. Sempre use o formato brasileiro para datas.
+13. Ao retornar datas no formato ISO, use o formato YYYY-MM-DD. Por exemplo, para 7 de abril de 2025, retorne "2025-04-07".
 
 Seu trabalho é compreender PRECISAMENTE a intenção e o contexto para permitir uma resposta natural e eficiente.
 `;
@@ -513,7 +522,7 @@ Seu trabalho é compreender PRECISAMENTE a intenção e o contexto para permitir
       }
     } catch (error) {
       this.logger.error(`Error in conversation analysis: ${error.message}`, error.stack);
-      // Retornar uma análise padrão em caso de erro
+      // Return a default analysis in case of error
       return {
         intent: "clarify",
         confidence: 0.5,
