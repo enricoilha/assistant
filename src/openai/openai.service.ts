@@ -90,19 +90,19 @@ Mensagem: "${message}"
 
 ${contextInfo}
 
-Detecte se o usuário está tentando:
-1. CRIAR um novo compromisso (ex: "Reunião amanhã às 15h", "Agendar almoço quinta")
-2. LER/LISTAR compromissos (ex: "Mostrar meus compromissos", "O que tenho agendado?")
-3. ATUALIZAR um compromisso existente (ex: "Mudar minha reunião das 15h para 16h", "O almoço será às 13h, não às 12h", "Reunião com a equipe adiada para amanhã")
-4. EXCLUIR um compromisso (ex: "Cancelar minha reunião de amanhã", "Remover consulta dentista")
+Identifique a intenção do usuário entre as seguintes operações:
+1. CRIAR um novo compromisso (exemplos: "Reunião amanhã às 15h", "Agendar almoço quinta")
+2. LER/LISTAR compromissos (exemplos: "Mostrar meus compromissos", "O que tenho agendado?")
+3. ATUALIZAR um compromisso existente (exemplos: "Mudar minha reunião das 15h para 16h", "O almoço será às 13h, não às 12h", "Reunião com a equipe adiada para amanhã")
+4. EXCLUIR um compromisso (exemplos: "Cancelar minha reunião de amanhã", "Remover consulta dentista")
 
-Preste atenção especial a mensagens que indicam alterações em compromissos existentes, como:
+Considere também mensagens que indicam alterações em compromissos existentes, como:
 - "O almoço com a família será às 12h, não às 13h"
 - "Mude o horário da reunião para 16h"
 - "Reunião do financeiro será na sala 2"
 - "Almoço com a família será no restaurante X"
 
-Estas são claramente atualizações, mesmo quando não usam verbos como "atualizar" ou "mudar".
+Estas podem ser interpretadas como atualizações, mesmo quando não usam verbos como "atualizar" ou "mudar".
 
 Retorne um objeto JSON com:
 1. "operation": A operação detectada ("create", "read", "update", "delete", ou "none" se não estiver claro)
@@ -110,12 +110,14 @@ Retorne um objeto JSON com:
 3. "taskId": ID da tarefa se mencionado ou extraível do contexto
 4. "updateInfo": Para atualizações, inclua as informações sendo alteradas
 
-Exemplos:
-- Para "Na verdade a reunião é às 14:00", classifique como uma operação de atualização com horário atualizado
-- Para "Cancelar minha consulta de amanhã", classifique como uma operação de exclusão
-- Para "Tenho uma reunião marcada para quando?", classifique como uma operação de leitura
-- Para "Agendar corte de cabelo quinta-feira", classifique como uma operação de criação
-- Para "O almoço será às 12h e não às 13h", classifique como uma operação de atualização com alta confiança
+Exemplos de interpretação:
+- Para "Na verdade a reunião é às 14:00", interprete como uma operação de atualização com horário atualizado
+- Para "Cancelar minha consulta de amanhã", interprete como uma operação de exclusão
+- Para "Tenho uma reunião marcada para quando?", interprete como uma operação de leitura
+- Para "Agendar corte de cabelo quinta-feira", interprete como uma operação de criação
+- Para "O almoço será às 12h e não às 13h", interprete como uma operação de atualização com alta confiança
+
+IMPORTANTE: Adapte sua interpretação ao contexto específico da mensagem, sem aplicar regras rígidas. O objetivo é capturar a intenção do usuário com precisão.
 `;
   }
 
@@ -375,6 +377,7 @@ Exemplos:
     return `
 Extraia informações de compromisso da seguinte mensagem em português. Hoje é ${formattedDate} e o horário atual é ${formattedTime}.
 Mensagem: "${message}"
+
 Extraia as seguintes informações e retorne-as como um objeto JSON:
 
 "action": A descrição ou tipo do compromisso (por exemplo, "Almoço", "Reunião", "Consulta")
@@ -382,23 +385,34 @@ Extraia as seguintes informações e retorne-as como um objeto JSON:
 "location": O local do compromisso (se mencionado)
 "participants": Uma matriz de participantes (se mencionados)
 
-Considerações importantes:
+Diretrizes para interpretação:
 
-1. COMPROMISSOS: "almoço", "jantar", "reunião", "consulta" são exemplos de tipos de compromissos
+1. COMPROMISSOS: Identifique o tipo de compromisso mencionado na mensagem. Exemplos incluem "almoço", "jantar", "reunião", "consulta", mas não se limite a estes.
 
-2. HORÁRIOS: Quando encontrar menções como "às 12h, não às 13h", considere 12h como o horário correto
-   Ou "será amanhã às 16h e não hoje às 15h" - considere amanhã às 16h como correto
+2. HORÁRIOS: Interprete os horários conforme mencionados na mensagem. 
+   - Para expressões como "às 12h, não às 13h", interprete 12h como o horário correto
+   - Para expressões como "será amanhã às 16h e não hoje às 15h", interprete "amanhã às 16h" como correto
+   - Extraia o horário exato mencionado pelo usuário, sem assumir valores padrão
 
-3. ATUALIZAÇÕES: Em mensagens de atualização, sempre extraia a NOVA informação correta, não a original.
+3. ATUALIZAÇÕES: Em mensagens de atualização, extraia a NOVA informação correta, não a original.
    Exemplo: "a reunião não será às 15h, mas sim às 16h" → extraia 16h como o horário
 
-4. PARTICIPANTES: "família", "equipe", "financeiro" são exemplos de participantes comuns
+4. PARTICIPANTES: Identifique os participantes mencionados na mensagem. Exemplos comuns incluem "família", "equipe", "financeiro", mas não se limite a estes.
 
-5. DATAS: IMPORTANTE - Sempre interprete datas no formato brasileiro (DD/MM/AAAA). 
-   Por exemplo, "07/04" significa 7 de abril, não 4 de julho.
-   Se a mensagem mencionar "dia 07/04", isso significa 7 de abril.
+5. DATAS: Interprete as datas conforme o contexto da mensagem e o formato brasileiro (DD/MM/AAAA).
+   - Para expressões como "07/04", interprete como 7 de abril
+   - Para expressões como "dia 07/04", interprete como 7 de abril
+   - Para expressões como "07/04/2024", interprete como 7 de abril de 2024
+   - Para expressões como "07/04", NÃO assuma que é 4 de julho
+   - Para expressões que mencionam apenas dia e mês (ex: "07/04"), considere o ano atual
+   - Para expressões relativas como "amanhã", "próxima semana", "daqui a 3 dias", calcule a data correta com base na data atual
 
-CERTIFIQUE-SE DE EXTRAIR O HORÁRIO CORRETAMENTE, ESPECIALMENTE PARA MENSAGENS DE ATUALIZAÇÃO.
+6. HORÁRIOS NÃO ESPECIFICADOS: Se a mensagem não mencionar um horário específico, NÃO assuma um horário padrão.
+   Em vez disso, retorne null para o campo dateTime e adicione uma flag "needsTimeConfirmation: true"
+
+7. INTERPRETAÇÃO FLEXÍVEL: Adapte sua interpretação ao contexto específico da mensagem. Não aplique regras rígidas, mas considere o significado pretendido pelo usuário.
+
+IMPORTANTE: Extraia as informações exatamente como mencionadas pelo usuário, sem assumir valores padrão ou fazer interpretações rígidas. O objetivo é capturar a intenção do usuário com precisão.
 `;
   }
   
@@ -475,22 +489,33 @@ Forneça uma análise completa no formato JSON:
   "suggestedResponseText": "Uma sugestão de resposta natural para o usuário"
 }
 
-DIRETRIZES IMPORTANTES:
-1. Para atualizações, identifique EXATAMENTE qual compromisso está sendo referenciado.
-2. Para atualizações de horário como "não 13h mas 12h", capte o NOVO horário (12h).
-3. Para mensagens ambíguas, solicite clarificação específica.
-4. Responda como um assistente inteligente e natural, não um robô.
-5. Evite pedir ao usuário para usar comandos; entenda a linguagem natural.
-6. Em caso de dúvida sobre qual compromisso está sendo referenciado, dê preferência aos mais próximos no tempo.
-7. Entenda referências como "o almoço" como sendo provavelmente o próximo almoço agendado.
-8. Priorize entender intenções de atualização, como "O almoço será às 12h, não às 13h".
-9. Use a data e hora da mensagem como referência para interpretar expressões relativas como "amanhã", "hoje", "próxima semana", etc.
-10. Se o usuário encaminhar uma mensagem, considere que ele quer criar um novo compromisso.
-11. IMPORTANTE: Sempre interprete datas no formato brasileiro (DD/MM/AAAA). Por exemplo, "07/04" significa 7 de abril, não 4 de julho.
-12. CRÍTICO: Quando a mensagem mencionar "dia 07/04", isso significa 7 de abril, não 4 de julho. Sempre use o formato brasileiro para datas.
-13. Ao retornar datas no formato ISO, use o formato YYYY-MM-DD. Por exemplo, para 7 de abril de 2025, retorne "2025-04-07".
+Diretrizes para interpretação:
 
-Seu trabalho é compreender PRECISAMENTE a intenção e o contexto para permitir uma resposta natural e eficiente.
+1. Para atualizações, identifique qual compromisso está sendo referenciado com base no contexto da mensagem.
+
+2. Para atualizações de horário como "não 13h mas 12h", interprete o NOVO horário (12h) conforme mencionado pelo usuário.
+
+3. Para mensagens ambíguas, solicite clarificação específica sobre o que o usuário deseja.
+
+4. Responda como um assistente inteligente e natural, adaptando-se ao estilo de comunicação do usuário.
+
+5. Entenda a linguagem natural do usuário, sem exigir comandos específicos.
+
+6. Em caso de dúvida sobre qual compromisso está sendo referenciado, considere o contexto completo da conversa.
+
+7. Para referências como "o almoço", interprete com base no contexto da conversa e nos compromissos existentes.
+
+8. Para intenções de atualização, como "O almoço será às 12h, não às 13h", interprete a nova informação correta.
+
+9. Use a data e hora da mensagem como referência para interpretar expressões relativas como "amanhã", "hoje", "próxima semana", etc.
+
+10. Para mensagens encaminhadas, considere que o usuário pode querer criar um novo compromisso.
+
+11. Para datas, interprete conforme o formato brasileiro (DD/MM/AAAA) e o contexto da mensagem. Por exemplo, "07/04" deve ser interpretado como 7 de abril, não 4 de julho, a menos que o contexto indique claramente o contrário.
+
+12. Adapte sua interpretação ao contexto específico da mensagem, sem aplicar regras rígidas.
+
+Seu objetivo é compreender a intenção do usuário com precisão, considerando o contexto completo da conversa e os compromissos existentes.
 `;
       
       const response = await this.openai.chat.completions.create({
@@ -555,14 +580,14 @@ ${JSON.stringify(analysis, null, 2)}
 ${updatedTaskInfo ? `INFORMAÇÕES ATUALIZADAS DO COMPROMISSO:
 ${JSON.stringify(updatedTaskInfo, null, 2)}` : ''}
 
-A resposta deve ser:
-1. Natural e conversacional
-2. Concisa mas completa
-3. Focada na ação realizada ou na informação solicitada
-4. Sem formalidades excessivas como "Seu compromisso foi..."
+Diretrizes para a resposta:
+1. Seja natural e conversacional, adaptando-se ao estilo de comunicação do usuário
+2. Seja conciso mas completo, fornecendo todas as informações relevantes
+3. Foque na ação realizada ou na informação solicitada pelo usuário
+4. Evite formalidades excessivas como "Seu compromisso foi..."
 
 Responda diretamente, como uma pessoa falaria. Se houve alteração, mencione especificamente o que mudou.
-Para atualizações de horário, diga algo como "Alterei o horário do almoço para 12h" em vez de "Seu compromisso foi atualizado com sucesso".
+Para atualizações de horário, você pode dizer algo como "Alterei o horário do almoço para 12h" em vez de "Seu compromisso foi atualizado com sucesso".
 
 Sua resposta (apenas o texto da mensagem, sem explicações):
 `;

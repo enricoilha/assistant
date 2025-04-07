@@ -32,6 +32,12 @@ export interface ConversationContext {
   tasks?: any[];
   hasConflict?: boolean;
   pendingUpdate?: any;
+  pendingTaskCreation?: {
+    title: string;
+    scheduledDate: string;
+    location?: string;
+    participants?: string[];
+  };
   lastAnalysis?: {
     intent: string;
     referencedTask?: {

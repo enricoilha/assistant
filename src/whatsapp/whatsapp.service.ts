@@ -6,6 +6,19 @@ import { TasksService } from '../tasks/tasks.service';
 import { lastValueFrom } from 'rxjs';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ConversationService } from './conversation.service';
+import * as dayjs from 'dayjs';
+import * as utc from 'dayjs/plugin/utc';
+import * as timezone from 'dayjs/plugin/timezone';
+import * as customParseFormat from 'dayjs/plugin/customParseFormat';
+import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
+import 'dayjs/locale/pt-br';
+
+// Configurar plugins do dayjs
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.extend(customParseFormat);
+dayjs.extend(isSameOrAfter);
+dayjs.locale('pt-br');
 
 /**
  * Armazena histórico de conversa recente para cada usuário
@@ -239,28 +252,27 @@ export class WhatsappService {
     timestamp: string
   ): Promise<void> {
     try {
-      // Get conversation state
+    
       const conversationState = await this.conversationService.getConversationState(from);
       
-      // Add message to conversation history
       await this.addToConversationHistory(from, 'user', messageText);
       
-      // Get user's tasks for context
+      //context
       const userTasks = await this.tasksService.findAllByUser(userId);
       
-      // Get conversation history
       const history = await this.getConversationHistory(from);
       const conversationMessages = history.messages.map(m => `${m.role}: ${m.content}`);
       
-      // Analyze the conversation with OpenAI
       const analysis = await this.openaiService.analyzeConversation(
         messageText,
         conversationMessages,
         userTasks,
         timestamp
       );
+  
+      analysis.messageText = messageText;
+      analysis.from = from;
       
-      // Process the analysis based on intent
       let responseText = '';
       
       switch (analysis.intent) {
@@ -269,7 +281,46 @@ export class WhatsappService {
           break;
           
         case 'create':
-          responseText = await this.handleTaskCreation(userId, analysis);
+          const hasTimeInMessage = messageText && (
+            messageText.includes('às') || 
+            messageText.includes('as') || 
+            messageText.includes('hora') || 
+            messageText.includes('horas') ||
+            /\d{1,2}[:h]\d{0,2}/.test(messageText)
+          );
+          
+          // Verificar se a data está no formato brasileiro (DD/MM/YYYY)
+          const brazilianDatePattern = /(\d{1,2})\/(\d{1,2})\/(\d{4})/;
+          const dateMatch = messageText.match(brazilianDatePattern);
+          
+          if (dateMatch) {
+            const day = dateMatch[1].padStart(2, '0');
+            const month = dateMatch[2].padStart(2, '0');
+            const year = dateMatch[3];
+            analysis.newTaskInfo.scheduledDate = `${year}-${month}-${day}`;
+            this.logger.log(`Data convertida de DD/MM/YYYY para YYYY-MM-DD: ${analysis.newTaskInfo.scheduledDate}`);
+          }
+          
+          if (!hasTimeInMessage && analysis.newTaskInfo && analysis.newTaskInfo.scheduledDate) {
+            // Se não mencionou horário, perguntar qual o horário desejado
+            const scheduledDate = analysis.newTaskInfo.scheduledDate;
+            const formattedDate = this.formatDateHumanized(scheduledDate);
+            
+            // Salvar o estado da conversa para continuar depois
+            await this.conversationService.saveConversationState(from, {
+              ...conversationState,
+              pendingTaskCreation: {
+                title: analysis.newTaskInfo.title,
+                scheduledDate: analysis.newTaskInfo.scheduledDate,
+                location: analysis.newTaskInfo.location,
+                participants: analysis.newTaskInfo.participants
+              }
+            });
+            
+            responseText = `Qual horário você deseja para o compromisso "${analysis.newTaskInfo.title}" em ${formattedDate}?`;
+          } else {
+            responseText = await this.handleTaskCreation(userId, analysis, from, conversationState);
+          }
           break;
           
         case 'delete':
@@ -343,9 +394,39 @@ export class WhatsappService {
       if (changes.title) updateData.title = changes.title;
       
       if (changes.scheduledDate) {
-        // Converter para Date se for string
-        updateData.scheduledDate = typeof changes.scheduledDate === 'string' ? 
-          new Date(changes.scheduledDate) : changes.scheduledDate;
+        // Converter para dayjs se for string
+        let taskDate = dayjs.isDayjs(changes.scheduledDate) ? 
+          changes.scheduledDate : 
+          dayjs.tz(changes.scheduledDate, 'America/Sao_Paulo');
+        
+        // Se a mensagem contém um horário, extrair e adicionar à data
+        const messageText = analysis.messageText || '';
+        const hasTimeInMessage = messageText && (
+          messageText.includes('às') || 
+          messageText.includes('as') || 
+          messageText.includes('hora') || 
+          messageText.includes('horas') ||
+          /\d{1,2}[:h]\d{0,2}/.test(messageText)
+        );
+        
+        if (hasTimeInMessage) {
+          // Tentar extrair o horário da mensagem
+          const timeMatch = messageText.match(/(\d{1,2})[:h](\d{0,2})/);
+          if (timeMatch) {
+            const hours = parseInt(timeMatch[1], 10);
+            const minutes = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+            
+            // Definir o horário no objeto dayjs
+            taskDate = taskDate.hour(hours).minute(minutes).second(0);
+          }
+        } else {
+          // Manter o horário original se não foi especificado um novo
+          const originalDate = dayjs.tz(taskToUpdate.scheduledDate, 'America/Sao_Paulo');
+          taskDate = taskDate.hour(originalDate.hour()).minute(originalDate.minute()).second(0);
+        }
+        
+        // Converter para UTC para salvar no banco
+        updateData.scheduledDate = taskDate.utc().toDate();
       }
       
       if (changes.location) updateData.location = changes.location;
@@ -353,28 +434,22 @@ export class WhatsappService {
       
       // Verificar se há conflitos de horário se estiver mudando a data
       if (updateData.scheduledDate) {
+        const newDate = dayjs.tz(updateData.scheduledDate, 'America/Sao_Paulo');
+        
         const conflictingTasks = userTasks.filter(task => {
           if (task.id === taskToUpdate.id) return false; // Ignorar o próprio compromisso
           
-          const taskDate = new Date(task.scheduledDate);
-          const newDate = new Date(updateData.scheduledDate);
+          const taskDate = dayjs.tz(task.scheduledDate, 'America/Sao_Paulo');
           
           // Verificar se está no mesmo dia e próximo no horário (2 horas antes ou depois)
-          const timeDiff = Math.abs(taskDate.getTime() - newDate.getTime());
-          const hoursDiff = timeDiff / (1000 * 60 * 60);
+          const timeDiff = Math.abs(taskDate.diff(newDate, 'hour'));
           
-          return hoursDiff < 2 && 
-            taskDate.getDate() === newDate.getDate() &&
-            taskDate.getMonth() === newDate.getMonth() &&
-            taskDate.getFullYear() === newDate.getFullYear();
+          return timeDiff < 2 && taskDate.isSame(newDate, 'day');
         });
         
         if (conflictingTasks.length > 0) {
           const conflict = conflictingTasks[0];
-          const conflictTime = new Date(conflict.scheduledDate).toLocaleTimeString('pt-BR', {
-            hour: '2-digit',
-            minute: '2-digit'
-          });
+          const conflictTime = this.formatTimeHumanized(conflict.scheduledDate);
           
           // Mencionar o conflito, mas ainda assim fazer a atualização
           const updatedTask = await this.tasksService.update(taskToUpdate.id, updateData);
@@ -387,15 +462,10 @@ export class WhatsappService {
           }
           
           if (updateData.scheduledDate) {
-            const oldTime = new Date(taskToUpdate.scheduledDate).toLocaleTimeString('pt-BR', {
-              hour: '2-digit',
-              minute: '2-digit'
-            });
-            
-            const newTime = new Date(updateData.scheduledDate).toLocaleTimeString('pt-BR', {
-              hour: '2-digit',
-              minute: '2-digit'
-            });
+            const oldDate = dayjs.tz(taskToUpdate.scheduledDate, 'America/Sao_Paulo');
+            const newDate = dayjs.tz(updateData.scheduledDate, 'America/Sao_Paulo');
+            const oldTime = this.formatTimeHumanized(oldDate);
+            const newTime = this.formatTimeHumanized(newDate);
             
             if (oldTime !== newTime) {
               changeDescriptions.push(`o horário de ${oldTime} para ${newTime}`);
@@ -428,15 +498,10 @@ export class WhatsappService {
       }
       
       if (updateData.scheduledDate) {
-        const oldTime = new Date(taskToUpdate.scheduledDate).toLocaleTimeString('pt-BR', {
-          hour: '2-digit',
-          minute: '2-digit'
-        });
-        
-        const newTime = new Date(updateData.scheduledDate).toLocaleTimeString('pt-BR', {
-          hour: '2-digit',
-          minute: '2-digit'
-        });
+        const oldDate = dayjs.tz(taskToUpdate.scheduledDate, 'America/Sao_Paulo');
+        const newDate = dayjs.tz(updateData.scheduledDate, 'America/Sao_Paulo');
+        const oldTime = this.formatTimeHumanized(oldDate);
+        const newTime = this.formatTimeHumanized(newDate);
         
         if (oldTime !== newTime) {
           changeDescriptions.push(`o horário de ${oldTime} para ${newTime}`);
@@ -469,7 +534,9 @@ export class WhatsappService {
    */
   async handleTaskCreation(
     userId: string,
-    analysis: any
+    analysis: any,
+    from: string,
+    conversationState: any
   ): Promise<string> {
     try {
       const newTaskInfo = analysis.newTaskInfo || {};
@@ -480,6 +547,25 @@ export class WhatsappService {
       }
       
       this.logger.log(`Data recebida do OpenAI: ${newTaskInfo.scheduledDate}`);
+      
+      // Verificar se precisamos confirmar o horário
+      if (analysis.needsTimeConfirmation) {
+        const scheduledDate = newTaskInfo.scheduledDate;
+        const formattedDate = this.formatDateHumanized(scheduledDate);
+        
+        // Salvar o estado da conversa para continuar depois
+        await this.conversationService.saveConversationState(from, {
+          ...conversationState,
+          pendingTaskCreation: {
+            title: newTaskInfo.title,
+            scheduledDate: newTaskInfo.scheduledDate,
+            location: newTaskInfo.location,
+            participants: newTaskInfo.participants
+          }
+        });
+        
+        return `Qual horário você deseja para o compromisso "${newTaskInfo.title}" em ${formattedDate}?`;
+      }
       
       // Verificar se a data está no formato correto (YYYY-MM-DD)
       // Se estiver no formato DD/MM/YYYY, converter para YYYY-MM-DD
@@ -495,20 +581,44 @@ export class WhatsappService {
             scheduledDate = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
             this.logger.log(`Data convertida de DD/MM/YYYY para YYYY-MM-DD: ${scheduledDate}`);
           }
-        } else if (scheduledDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
-          // Data no formato ISO sem hora (YYYY-MM-DD)
-          // Adicionar hora padrão (meio-dia) para evitar problemas de fuso horário
-          scheduledDate = `${scheduledDate}T12:00:00`;
-          this.logger.log(`Data ISO sem hora convertida para ISO com hora: ${scheduledDate}`);
         }
       }
       
-      console.log('scheduledDate', scheduledDate);
-      // Converter a data para UTC antes de salvar
-      const localDate = new Date(scheduledDate);
-      this.logger.log(`Data convertida para objeto Date: ${localDate.toISOString()}`);
-      const utcDate = new Date(localDate.getTime() + (localDate.getTimezoneOffset() * 60000));
-      this.logger.log(`Data convertida para UTC: ${utcDate.toISOString()}`);
+      // Verificar se a mensagem contém um horário
+      const messageText = analysis.messageText || '';
+      const hasTimeInMessage = messageText && (
+        messageText.includes('às') || 
+        messageText.includes('as') || 
+        messageText.includes('hora') || 
+        messageText.includes('horas') ||
+        /\d{1,2}[:h]\d{0,2}/.test(messageText)
+      );
+      
+      // Criar objeto dayjs com timezone
+      let taskDate = dayjs.tz(scheduledDate, 'America/Sao_Paulo');
+      
+      // Se a mensagem contém um horário, extrair e adicionar à data
+      if (hasTimeInMessage) {
+        // Tentar extrair o horário da mensagem
+        const timeMatch = messageText.match(/(\d{1,2})[:h](\d{0,2})/);
+        if (timeMatch) {
+          const hours = parseInt(timeMatch[1], 10);
+          const minutes = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+          
+          // Definir o horário no objeto dayjs
+          taskDate = taskDate.hour(hours).minute(minutes).second(0);
+          this.logger.log(`Horário extraído da mensagem: ${hours}:${minutes}`);
+        }
+      } else {
+        // Se não tem horário na mensagem, usar horário padrão (meio-dia)
+        taskDate = taskDate.hour(12).minute(0).second(0);
+      }
+      
+      this.logger.log(`Data local: ${taskDate.format()}`);
+      
+      // Converter para UTC para salvar no banco
+      const utcDate = taskDate.utc().toDate();
+      this.logger.log(`Data UTC: ${utcDate.toISOString()}`);
 
       // Criar o compromisso
       const taskData = {
@@ -522,10 +632,10 @@ export class WhatsappService {
       
       const newTask = await this.tasksService.createTask(taskData);
       
-      // Formatar data e hora
-      const taskDate = this.convertUTCToLocal(new Date(newTask.scheduledDate));
-      const dateText = this.formatDateHumanized(taskDate);
-      const timeText = this.formatTimeHumanized(taskDate);
+      // Formatar a data para exibição
+      const displayDate = dayjs.tz(newTask.scheduledDate, 'America/Sao_Paulo');
+      const dateText = this.formatDateHumanized(displayDate);
+      const timeText = this.formatTimeHumanized(displayDate);
       
       // Gerar mensagem de confirmação
       let response = `Perfeito! Agendei ${newTask.title} para ${dateText} às ${timeText}`;
@@ -558,23 +668,28 @@ export class WhatsappService {
     try {
       // Verificar se temos um compromisso referenciado
       if (!analysis.referencedTask?.id) {
-        return "Não consegui identificar qual compromisso você quer excluir. Pode ser mais específico?";
+        return "Não consegui identificar qual compromisso você quer remover. Pode ser mais específico?";
       }
       
       // Verificar se o compromisso existe
       const taskToDelete = userTasks.find(t => t.id === analysis.referencedTask.id);
       if (!taskToDelete) {
-        return "Não encontrei esse compromisso nos seus agendamentos.";
+        return "Não encontrei esse compromisso nos seus agendamentos. Pode verificar se ele existe?";
       }
       
-      // Excluir o compromisso
+      // Confirmar a exclusão
       await this.tasksService.remove(taskToDelete.id);
       
-      // Gerar mensagem de confirmação
-      return `Pronto! Excluí o compromisso "${taskToDelete.title}" da sua agenda.`;
+      // Gerar mensagem de confirmação conversacional
+      const taskDate = dayjs.tz(taskToDelete.scheduledDate, 'America/Sao_Paulo');
+      const time = this.formatTimeHumanized(taskDate);
+      const date = this.formatDateHumanized(taskDate);
+      
+      return `Pronto! Removi o compromisso "${taskToDelete.title}" que estava agendado para ${date} às ${time}.`;
+      
     } catch (error) {
-      this.logger.error(`Erro ao excluir compromisso: ${error.message}`, error.stack);
-      return "Tive um problema ao excluir o compromisso. Pode tentar novamente?";
+      this.logger.error(`Erro ao remover compromisso: ${error.message}`, error.stack);
+      return "Ocorreu um erro ao tentar remover o compromisso. Pode tentar novamente?";
     }
   }
 
@@ -587,56 +702,72 @@ export class WhatsappService {
     userTasks: any[]
   ): Promise<string> {
     try {
-      if (!userTasks || userTasks.length === 0) {
-        return "Você não tem nenhum compromisso agendado no momento.";
-      }
+      // Filtrar e ordenar tarefas
+      const now = dayjs().tz('America/Sao_Paulo');
       
-      // Filtrar para mostrar apenas compromissos futuros
-      const now = new Date();
+      // Filtrar tarefas futuras
       const upcomingTasks = userTasks
-        .filter(task => this.convertUTCToLocal(new Date(task.scheduledDate)) >= now)
-        .sort((a, b) => new Date(a.scheduledDate).getTime() - new Date(b.scheduledDate).getTime());
+        .filter(task => {
+          const taskDate = dayjs.tz(task.scheduledDate, 'America/Sao_Paulo');
+          return taskDate.isAfter(now);
+        })
+        .sort((a, b) => {
+          const dateA = dayjs.tz(a.scheduledDate, 'America/Sao_Paulo');
+          const dateB = dayjs.tz(b.scheduledDate, 'America/Sao_Paulo');
+          return dateA.unix() - dateB.unix();
+        });
       
       if (upcomingTasks.length === 0) {
-        return "Você não tem compromissos futuros agendados. Quer criar um novo?";
+        return "Você não tem compromissos agendados para os próximos dias.";
       }
       
-      // Formatar compromissos
-      const formattedTasks = upcomingTasks.map(task => {
-        const date = this.convertUTCToLocal(new Date(task.scheduledDate));
+      // Agrupar tarefas por data
+      const tasksByDate = new Map<string, any[]>();
+      
+      upcomingTasks.forEach(task => {
+        const taskDate = dayjs.tz(task.scheduledDate, 'America/Sao_Paulo');
+        const dateKey = taskDate.format('YYYY-MM-DD');
         
-        // Verificar se é hoje ou amanhã
-        const isToday = this.isSameDay(date, now);
-        const isTomorrow = this.isSameDay(new Date(now.getTime() + 24 * 60 * 60 * 1000), date);
-        
-        let dateText;
-        if (isToday) {
-          dateText = "hoje";
-        } else if (isTomorrow) {
-          dateText = "amanhã";
-        } else {
-          dateText = date.toLocaleDateString('pt-BR', {
-            weekday: 'long',
-            day: 'numeric',
-            month: 'long'
-          });
+        if (!tasksByDate.has(dateKey)) {
+          tasksByDate.set(dateKey, []);
         }
         
-        const timeText = date.toLocaleTimeString('pt-BR', {
-          hour: '2-digit',
-          minute: '2-digit'
-        });
-        
-        return `• ${task.title}: ${dateText} às ${timeText}${task.location ? ` em ${task.location}` : ''}`;
+        tasksByDate.get(dateKey).push(task);
       });
       
-      // Gerar mensagem de listagem
-      let response = `Aqui estão seus próximos compromissos:\n\n${formattedTasks.join('\n\n')}`;
+      // Gerar resposta formatada
+      let response = "Seus próximos compromissos:\n\n";
+      
+      for (const [dateKey, tasks] of tasksByDate) {
+        const date = dayjs.tz(dateKey, 'America/Sao_Paulo');
+        const dateText = this.formatDateHumanized(date);
+        
+        response += `${dateText}:\n`;
+        
+        tasks.forEach(task => {
+          const taskDate = dayjs.tz(task.scheduledDate, 'America/Sao_Paulo');
+          const time = this.formatTimeHumanized(taskDate);
+          response += `- ${time}: ${task.title}`;
+          
+          if (task.location) {
+            response += ` em ${task.location}`;
+          }
+          
+          if (task.participants && task.participants.length > 0) {
+            response += ` com ${task.participants.join(', ')}`;
+          }
+          
+          response += '\n';
+        });
+        
+        response += '\n';
+      }
       
       return response;
+      
     } catch (error) {
       this.logger.error(`Erro ao listar compromissos: ${error.message}`, error.stack);
-      return "Tive um problema ao buscar seus compromissos. Pode tentar novamente?";
+      return "Ocorreu um erro ao tentar listar seus compromissos. Pode tentar novamente?";
     }
   }
 
@@ -650,163 +781,100 @@ export class WhatsappService {
   ): Promise<string> {
     try {
       // Verificar se temos um compromisso referenciado
-      if (analysis.referencedTask?.id) {
-        // Consulta sobre um compromisso específico
-        const task = userTasks.find(t => t.id === analysis.referencedTask.id);
-        if (!task) {
-          return "Não encontrei esse compromisso nos seus agendamentos.";
-        }
-        
-        // Formatar data e hora
-        const taskDate = this.convertUTCToLocal(new Date(task.scheduledDate));
-        
-        // Verificar se é hoje ou amanhã
-        const now = new Date();
-        const isToday = this.isSameDay(taskDate, now);
-        const isTomorrow = this.isSameDay(new Date(now.getTime() + 24 * 60 * 60 * 1000), taskDate);
-        
-        let dateText;
-        if (isToday) {
-          dateText = "hoje";
-        } else if (isTomorrow) {
-          dateText = "amanhã";
-        } else {
-          dateText = taskDate.toLocaleDateString('pt-BR', {
-            weekday: 'long',
-            day: 'numeric',
-            month: 'long'
-          });
-        }
-        
-        const timeText = taskDate.toLocaleTimeString('pt-BR', {
-          hour: '2-digit',
-          minute: '2-digit'
-        });
-        
-        // Gerar resposta
-        let response = `Seu compromisso "${task.title}" está agendado para ${dateText} às ${timeText}`;
-        
-        if (task.location) {
-          response += ` em ${task.location}`;
-        }
-        
-        if (task.participants && task.participants.length > 0) {
-          response += ` com ${task.participants.join(', ')}`;
-        }
-        
-        response += ".";
-        
-        return response;
-      } 
-      else {
-        // Consulta geral sobre compromissos
-        const now = new Date();
-        const upcomingTasks = userTasks
-          .filter(task => this.convertUTCToLocal(new Date(task.scheduledDate)) >= now)
-          .sort((a, b) => new Date(a.scheduledDate).getTime() - new Date(b.scheduledDate).getTime());
-        
-        if (upcomingTasks.length === 0) {
-          return "Você não tem compromissos agendados para os próximos dias.";
-        }
-        
-        // Mostrar apenas o próximo compromisso
-        const nextTask = upcomingTasks[0];
-        const taskDate = this.convertUTCToLocal(new Date(nextTask.scheduledDate));
-        
-        // Verificar se é hoje ou amanhã
-        const isToday = this.isSameDay(taskDate, now);
-        const isTomorrow = this.isSameDay(new Date(now.getTime() + 24 * 60 * 60 * 1000), taskDate);
-        
-        let dateText;
-        if (isToday) {
-          dateText = "hoje";
-        } else if (isTomorrow) {
-          dateText = "amanhã";
-        } else {
-          dateText = taskDate.toLocaleDateString('pt-BR', {
-            weekday: 'long',
-            day: 'numeric',
-            month: 'long'
-          });
-        }
-        
-        const timeText = taskDate.toLocaleTimeString('pt-BR', {
-          hour: '2-digit',
-          minute: '2-digit'
-        });
-        
-        // Gerar resposta
-        let response = `Seu próximo compromisso é "${nextTask.title}" ${dateText} às ${timeText}`;
-        
-        if (nextTask.location) {
-          response += ` em ${nextTask.location}`;
-        }
-        
-        if (upcomingTasks.length > 1) {
-          response += `. Você tem outros ${upcomingTasks.length - 1} compromissos agendados para os próximos dias.`;
-        } else {
-          response += ".";
-        }
-        
-        return response;
+      if (!analysis.referencedTask?.id) {
+        return "Não consegui identificar qual compromisso você quer consultar. Pode ser mais específico?";
       }
+      
+      // Verificar se o compromisso existe
+      const task = userTasks.find(t => t.id === analysis.referencedTask.id);
+      if (!task) {
+        return "Não encontrei esse compromisso nos seus agendamentos. Pode verificar se ele existe?";
+      }
+      
+      // Gerar resposta detalhada
+      const taskDate = dayjs.tz(task.scheduledDate, 'America/Sao_Paulo');
+      const time = this.formatTimeHumanized(taskDate);
+      const date = this.formatDateHumanized(taskDate);
+      
+      let response = `O compromisso "${task.title}" está agendado para ${date} às ${time}.`;
+      
+      if (task.location) {
+        response += `\nLocal: ${task.location}`;
+      }
+      
+      if (task.participants && task.participants.length > 0) {
+        response += `\nParticipantes: ${task.participants.join(', ')}`;
+      }
+      
+      // Verificar se há conflitos de horário
+      const conflictingTasks = userTasks.filter(t => {
+        if (t.id === task.id) return false;
+        
+        const otherDate = dayjs.tz(t.scheduledDate, 'America/Sao_Paulo');
+        const timeDiff = Math.abs(otherDate.diff(taskDate, 'hour'));
+        
+        return timeDiff < 2 && otherDate.isSame(taskDate, 'day');
+      });
+      
+      if (conflictingTasks.length > 0) {
+        response += '\n\nObservação: Você tem outros compromissos próximos a este horário:';
+        conflictingTasks.forEach(conflict => {
+          const conflictTime = this.formatTimeHumanized(conflict.scheduledDate);
+          response += `\n- "${conflict.title}" às ${conflictTime}`;
+        });
+      }
+      
+      return response;
+      
     } catch (error) {
-      this.logger.error(`Erro ao consultar compromissos: ${error.message}`, error.stack);
-      return "Tive um problema ao buscar informações sobre seus compromissos. Pode tentar novamente?";
+      this.logger.error(`Erro ao consultar compromisso: ${error.message}`, error.stack);
+      return "Ocorreu um erro ao tentar consultar o compromisso. Pode tentar novamente?";
     }
   }
 
   /**
    * Converte uma data UTC para o fuso horário local
    */
-  private convertUTCToLocal(date: Date): Date {
-    const localDate = new Date(date.getTime() - (date.getTimezoneOffset() * 60000));
-    return localDate;
+  private convertUTCToLocal(date: Date | string | dayjs.Dayjs): dayjs.Dayjs {
+    if (dayjs.isDayjs(date)) {
+      return date.tz('America/Sao_Paulo');
+    }
+    return dayjs.utc(date).tz('America/Sao_Paulo');
   }
 
   /**
    * Formata datas de maneira natural, como uma pessoa falaria
    */
-  formatDateHumanized(date: Date): string {
-    const localDate = this.convertUTCToLocal(date);
-    const now = new Date();
-    const tomorrow = new Date(now);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    
-    const dayAfterTomorrow = new Date(now);
-    dayAfterTomorrow.setDate(dayAfterTomorrow.getDate() + 2);
+  formatDateHumanized(date: dayjs.Dayjs | Date | string): string {
+    const localDate = dayjs.isDayjs(date) ? date : dayjs.tz(date, 'America/Sao_Paulo');
+    const now = dayjs().tz('America/Sao_Paulo');
     
     // Verificar se é hoje, amanhã, ou depois de amanhã
-    if (this.isSameDay(localDate, now)) {
+    if (localDate.isSame(now, 'day')) {
       return "hoje";
-    } else if (this.isSameDay(localDate, tomorrow)) {
+    } else if (localDate.isSame(now.add(1, 'day'), 'day')) {
       return "amanhã";
-    } else if (this.isSameDay(localDate, dayAfterTomorrow)) {
+    } else if (localDate.isSame(now.add(2, 'day'), 'day')) {
       return "depois de amanhã";
     }
     
     // Verificar se é esta semana
-    const dayDiff = this.getDayDifference(now, localDate);
+    const dayDiff = localDate.diff(now, 'day');
     if (dayDiff < 7) {
-      const weekdayName = localDate.toLocaleDateString('pt-BR', { weekday: 'long' });
-      return weekdayName;
+      return localDate.format('dddd');
     }
     
     // Para datas mais distantes, usar formato mais completo
-    return localDate.toLocaleDateString('pt-BR', { 
-      weekday: 'long',
-      day: 'numeric',
-      month: 'long'
-    });
+    return localDate.format('dddd, D [de] MMMM');
   }
 
   /**
    * Formata horários de maneira natural
    */
-  formatTimeHumanized(date: Date): string {
-    const localDate = this.convertUTCToLocal(date);
-    const hours = localDate.getHours();
-    const minutes = localDate.getMinutes();
+  formatTimeHumanized(date: dayjs.Dayjs | Date | string): string {
+    const localDate = dayjs.isDayjs(date) ? date : dayjs.tz(date, 'America/Sao_Paulo');
+    const hours = localDate.hour();
+    const minutes = localDate.minute();
     
     // Formatos especiais para horários "redondos"
     if (minutes === 0) {
@@ -826,30 +894,26 @@ export class WhatsappService {
         return `${hours} e meia`;
       }
     } else {
-      // Formato padrão para outros horários
-      return localDate.toLocaleTimeString('pt-BR', { 
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-      });
+      return localDate.format('HH:mm');
     }
   }
 
   /**
    * Verifica se duas datas são no mesmo dia
    */
-  isSameDay(date1: Date, date2: Date): boolean {
-    return date1.getDate() === date2.getDate() &&
-           date1.getMonth() === date2.getMonth() &&
-           date1.getFullYear() === date2.getFullYear();
+  isSameDay(date1: dayjs.Dayjs | Date | string, date2: dayjs.Dayjs | Date | string): boolean {
+    const d1 = dayjs.isDayjs(date1) ? date1 : dayjs.tz(date1, 'America/Sao_Paulo');
+    const d2 = dayjs.isDayjs(date2) ? date2 : dayjs.tz(date2, 'America/Sao_Paulo');
+    return d1.isSame(d2, 'day');
   }
 
   /**
    * Calcula a diferença em dias entre duas datas
    */
-  getDayDifference(date1: Date, date2: Date): number {
-    const diffTime = Math.abs(date2.getTime() - date1.getTime());
-    return Math.floor(diffTime / (1000 * 60 * 60 * 24));
+  getDayDifference(date1: dayjs.Dayjs | Date | string, date2: dayjs.Dayjs | Date | string): number {
+    const d1 = dayjs.isDayjs(date1) ? date1 : dayjs.tz(date1, 'America/Sao_Paulo');
+    const d2 = dayjs.isDayjs(date2) ? date2 : dayjs.tz(date2, 'America/Sao_Paulo');
+    return Math.abs(d2.diff(d1, 'day'));
   }
 
   /**
@@ -887,7 +951,7 @@ export class WhatsappService {
    * Formata um compromisso de forma conversacional para confirmações
    */
   formatAppointmentConfirmation(task: any, changes?: any): string {
-    const taskDate = new Date(task.scheduledDate);
+    const taskDate = this.convertUTCToLocal(new Date(task.scheduledDate));
     const dateText = this.formatDateHumanized(taskDate);
     const timeText = this.formatTimeHumanized(taskDate);
     
@@ -1046,15 +1110,14 @@ export class WhatsappService {
       }
       
       // Group tasks by date
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
+      const today = dayjs().startOf('day');
       
-      const pastTasks = tasks.filter(task => new Date(task.scheduledDate) < today);
-      const upcomingTasks = tasks.filter(task => new Date(task.scheduledDate) >= today);
+      const pastTasks = tasks.filter(task => dayjs(task.scheduledDate).isBefore(today));
+      const upcomingTasks = tasks.filter(task => dayjs(task.scheduledDate).isSameOrAfter(today));
       
       // Sort upcoming tasks by date
       upcomingTasks.sort((a, b) => 
-        new Date(a.scheduledDate).getTime() - new Date(b.scheduledDate).getTime()
+        dayjs(a.scheduledDate).unix() - dayjs(b.scheduledDate).unix()
       );
       
       // Generate list message in a more conversational style
@@ -1064,13 +1127,11 @@ export class WhatsappService {
         message += 'Aqui estão seus próximos compromissos:\n\n';
         
         upcomingTasks.forEach((task, index) => {
-          const date = new Date(task.scheduledDate);
+          const date = dayjs.tz(task.scheduledDate, 'America/Sao_Paulo');
           
           // Check if today or tomorrow for more natural language
-          const isToday = this.isSameDay(date, today);
-          const tomorrow = new Date(today);
-          tomorrow.setDate(today.getDate() + 1);
-          const isTomorrow = this.isSameDay(date, tomorrow);
+          const isToday = date.isSame(today, 'day');
+          const isTomorrow = date.isSame(today.add(1, 'day'), 'day');
           
           let datePhrase;
           if (isToday) {
@@ -1078,17 +1139,10 @@ export class WhatsappService {
           } else if (isTomorrow) {
             datePhrase = "amanhã";
           } else {
-            datePhrase = date.toLocaleDateString('pt-BR', {
-              weekday: 'long', 
-              day: 'numeric', 
-              month: 'long'
-            });
+            datePhrase = date.format('dddd, D [de] MMMM');
           }
           
-          const timePhrase = date.toLocaleTimeString('pt-BR', {
-            hour: '2-digit',
-            minute: '2-digit'
-          });
+          const timePhrase = date.format('HH:mm');
           
           message += `• *${task.title}* - ${datePhrase} às ${timePhrase}`;
           
@@ -1110,7 +1164,7 @@ export class WhatsappService {
         // Show only recent past tasks
         const recentPastTasks = pastTasks
           .sort((a, b) => 
-            new Date(b.scheduledDate).getTime() - new Date(a.scheduledDate).getTime()
+            dayjs(b.scheduledDate).unix() - dayjs(a.scheduledDate).unix()
           )
           .slice(0, 3);
         
@@ -1118,14 +1172,8 @@ export class WhatsappService {
           message += 'Compromissos recentes:\n\n';
           
           recentPastTasks.forEach((task) => {
-            const date = new Date(task.scheduledDate);
-            const formattedDate = date.toLocaleDateString('pt-BR', {
-              weekday: 'long', 
-              day: 'numeric', 
-              month: 'long',
-              hour: '2-digit',
-              minute: '2-digit'
-            });
+            const date = dayjs.tz(task.scheduledDate, 'America/Sao_Paulo');
+            const formattedDate = date.format('dddd, D [de] MMMM [às] HH:mm');
             
             message += `• *${task.title}* - ${formattedDate}\n\n`;
           });
