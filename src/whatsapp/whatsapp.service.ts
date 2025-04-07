@@ -289,7 +289,6 @@ export class WhatsappService {
             /\d{1,2}[:h]\d{0,2}/.test(messageText)
           );
           
-          // Verificar se a data está no formato brasileiro (DD/MM/YYYY)
           const brazilianDatePattern = /(\d{1,2})\/(\d{1,2})\/(\d{4})/;
           const dateMatch = messageText.match(brazilianDatePattern);
           
@@ -548,41 +547,8 @@ export class WhatsappService {
       
       this.logger.log(`Data recebida do OpenAI: ${newTaskInfo.scheduledDate}`);
       
-      // Verificar se precisamos confirmar o horário
-      if (analysis.needsTimeConfirmation) {
-        const scheduledDate = newTaskInfo.scheduledDate;
-        const formattedDate = this.formatDateHumanized(scheduledDate);
-        
-        // Salvar o estado da conversa para continuar depois
-        await this.conversationService.saveConversationState(from, {
-          ...conversationState,
-          pendingTaskCreation: {
-            title: newTaskInfo.title,
-            scheduledDate: newTaskInfo.scheduledDate,
-            location: newTaskInfo.location,
-            participants: newTaskInfo.participants
-          }
-        });
-        
-        return `Qual horário você deseja para o compromisso "${newTaskInfo.title}" em ${formattedDate}?`;
-      }
-      
-      // Verificar se a data está no formato correto (YYYY-MM-DD)
-      // Se estiver no formato DD/MM/YYYY, converter para YYYY-MM-DD
-      let scheduledDate = newTaskInfo.scheduledDate;
-      if (typeof scheduledDate === 'string') {
-        if (scheduledDate.includes('/')) {
-          const parts = scheduledDate.split('/');
-          if (parts.length === 3) {
-            // Assumir formato DD/MM/YYYY
-            const day = parts[0];
-            const month = parts[1];
-            const year = parts[2];
-            scheduledDate = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-            this.logger.log(`Data convertida de DD/MM/YYYY para YYYY-MM-DD: ${scheduledDate}`);
-          }
-        }
-      }
+      // Criar objeto dayjs com timezone
+      let taskDate = dayjs.tz(newTaskInfo.scheduledDate, 'America/Sao_Paulo');
       
       // Verificar se a mensagem contém um horário
       const messageText = analysis.messageText || '';
@@ -593,9 +559,6 @@ export class WhatsappService {
         messageText.includes('horas') ||
         /\d{1,2}[:h]\d{0,2}/.test(messageText)
       );
-      
-      // Criar objeto dayjs com timezone
-      let taskDate = dayjs.tz(scheduledDate, 'America/Sao_Paulo');
       
       // Se a mensagem contém um horário, extrair e adicionar à data
       if (hasTimeInMessage) {
@@ -616,8 +579,8 @@ export class WhatsappService {
       
       this.logger.log(`Data local: ${taskDate.format()}`);
       
-      // Converter para UTC para salvar no banco
-      const utcDate = taskDate.utc().toDate();
+      // Manter a data no fuso horário local ao salvar no banco
+      const utcDate = taskDate.toDate();
       this.logger.log(`Data UTC: ${utcDate.toISOString()}`);
 
       // Criar o compromisso
@@ -632,10 +595,9 @@ export class WhatsappService {
       
       const newTask = await this.tasksService.createTask(taskData);
       
-      // Formatar a data para exibição
-      const displayDate = dayjs.tz(newTask.scheduledDate, 'America/Sao_Paulo');
-      const dateText = this.formatDateHumanized(displayDate);
-      const timeText = this.formatTimeHumanized(displayDate);
+      // Formatar a data para exibição usando o objeto dayjs original
+      const dateText = this.formatDateHumanized(taskDate);
+      const timeText = this.formatTimeHumanized(taskDate);
       
       // Gerar mensagem de confirmação
       let response = `Perfeito! Agendei ${newTask.title} para ${dateText} às ${timeText}`;
@@ -846,7 +808,11 @@ export class WhatsappService {
    * Formata datas de maneira natural, como uma pessoa falaria
    */
   formatDateHumanized(date: dayjs.Dayjs | Date | string): string {
-    const localDate = dayjs.isDayjs(date) ? date : dayjs.tz(date, 'America/Sao_Paulo');
+    // Garantir que a data está no formato dayjs com timezone correto
+    const localDate = dayjs.isDayjs(date) ? 
+      date.tz('America/Sao_Paulo') : 
+      dayjs.tz(date, 'America/Sao_Paulo');
+    
     const now = dayjs().tz('America/Sao_Paulo');
     
     // Verificar se é hoje, amanhã, ou depois de amanhã
@@ -858,12 +824,6 @@ export class WhatsappService {
       return "depois de amanhã";
     }
     
-    // Verificar se é esta semana
-    const dayDiff = localDate.diff(now, 'day');
-    if (dayDiff < 7) {
-      return localDate.format('dddd');
-    }
-    
     // Para datas mais distantes, usar formato mais completo
     return localDate.format('dddd, D [de] MMMM');
   }
@@ -872,7 +832,11 @@ export class WhatsappService {
    * Formata horários de maneira natural
    */
   formatTimeHumanized(date: dayjs.Dayjs | Date | string): string {
-    const localDate = dayjs.isDayjs(date) ? date : dayjs.tz(date, 'America/Sao_Paulo');
+    // Garantir que a data está no formato dayjs com timezone correto
+    const localDate = dayjs.isDayjs(date) ? 
+      date.tz('America/Sao_Paulo') : 
+      dayjs.tz(date, 'America/Sao_Paulo');
+    
     const hours = localDate.hour();
     const minutes = localDate.minute();
     
