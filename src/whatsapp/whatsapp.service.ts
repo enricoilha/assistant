@@ -286,18 +286,44 @@ export class WhatsappService {
             messageText.includes('as') || 
             messageText.includes('hora') || 
             messageText.includes('horas') ||
-            /\d{1,2}[:h]\d{0,2}/.test(messageText)
+            /\d{1,2}[:h]\d{0,2}/.test(messageText) ||
+            /\d{1,2}[:]\d{1,2}/.test(messageText)
           );
+
+          let extractedHours, extractedMinutes;
+          const timePattern = /(\d{1,2})[:h](\d{1,2})/;
+          const timeMatch = messageText.match(timePattern);
+          if (timeMatch) {
+            extractedHours = parseInt(timeMatch[1], 10);
+            extractedMinutes = parseInt(timeMatch[2], 10);
+            this.logger.log(`Extracted time: ${extractedHours}:${extractedMinutes}`);
+          }
           
           const brazilianDatePattern = /(\d{1,2})\/(\d{1,2})\/(\d{4})/;
           const dateMatch = messageText.match(brazilianDatePattern);
-          
+
           if (dateMatch) {
             const day = dateMatch[1].padStart(2, '0');
             const month = dateMatch[2].padStart(2, '0');
             const year = dateMatch[3];
             analysis.newTaskInfo.scheduledDate = `${year}-${month}-${day}`;
             this.logger.log(`Data convertida de DD/MM/YYYY para YYYY-MM-DD: ${analysis.newTaskInfo.scheduledDate}`);
+          }
+
+          const dayOnlyPattern = /dia\s+(\d{1,2})/i;
+          const dayOnlyMatch = messageText.match(dayOnlyPattern);
+          if (dayOnlyMatch && !dateMatch) {
+            const day = parseInt(dayOnlyMatch[1], 10);
+            const currentDate = new Date();
+            const year = currentDate.getFullYear();
+            const month = currentDate.getMonth() + 1; // JavaScript months are 0-indexed
+            
+            // Format with leading zeros
+            const formattedDay = day.toString().padStart(2, '0');
+            const formattedMonth = month.toString().padStart(2, '0');
+            
+            analysis.newTaskInfo.scheduledDate = `${year}-${formattedMonth}-${formattedDay}`;
+            this.logger.log(`Extracted "dia X" pattern as current month: ${analysis.newTaskInfo.scheduledDate}`);
           }
           
           if (!hasTimeInMessage && analysis.newTaskInfo && analysis.newTaskInfo.scheduledDate) {
@@ -540,53 +566,90 @@ export class WhatsappService {
     try {
       const newTaskInfo = analysis.newTaskInfo || {};
       
-      // Verificar se temos informações suficientes
+      // Verify if we have enough information
       if (!newTaskInfo.title || !newTaskInfo.scheduledDate) {
         return "Preciso de mais informações para criar o compromisso. Qual o título e quando será?";
       }
       
       this.logger.log(`Data recebida do OpenAI: ${newTaskInfo.scheduledDate}`);
       
-      // Criar objeto dayjs com timezone
-      let taskDate = dayjs.tz(newTaskInfo.scheduledDate, 'America/Sao_Paulo');
-      
-      // Verificar se a mensagem contém um horário
-      const messageText = analysis.messageText || '';
-      const hasTimeInMessage = messageText && (
-        messageText.includes('às') || 
-        messageText.includes('as') || 
-        messageText.includes('hora') || 
-        messageText.includes('horas') ||
-        /\d{1,2}[:h]\d{0,2}/.test(messageText)
-      );
-      
-      // Se a mensagem contém um horário, extrair e adicionar à data
-      if (hasTimeInMessage) {
-        // Tentar extrair o horário da mensagem
-        const timeMatch = messageText.match(/(\d{1,2})[:h](\d{0,2})/);
-        if (timeMatch) {
-          const hours = parseInt(timeMatch[1], 10);
-          const minutes = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
-          
-          // Definir o horário no objeto dayjs
-          taskDate = taskDate.hour(hours).minute(minutes).second(0);
-          this.logger.log(`Horário extraído da mensagem: ${hours}:${minutes}`);
+      // Create dayjs object with timezone
+      let taskDate;
+      try {
+        // First attempt to parse the date
+        taskDate = dayjs.tz(newTaskInfo.scheduledDate, 'America/Sao_Paulo');
+        this.logger.log(`Parsed date from scheduledDate: ${taskDate.format()}`);
+        
+        // Check if the date is valid
+        if (!taskDate.isValid()) {
+          throw new Error('Invalid date format');
         }
-      } else {
-        // Se não tem horário na mensagem, usar horário padrão (meio-dia)
-        taskDate = taskDate.hour(12).minute(0).second(0);
+      } catch (err) {
+        // If we can't parse the date, use current date
+        this.logger.warn(`Error parsing date: ${err.message}. Using current date.`);
+        taskDate = dayjs().tz('America/Sao_Paulo');
       }
       
-      this.logger.log(`Data local: ${taskDate.format()}`);
+      // Check if message contains a time
+      const messageText = analysis.messageText || '';
       
-      // Manter a data no fuso horário local ao salvar no banco
+      // Improved time extraction - check for various time formats
+      let timeExtracted = false;
+      
+      // Check for HH:MM or HHhMM format
+      const timePattern = /(\d{1,2})[:h](\d{1,2})/;
+      const timeMatch = messageText.match(timePattern);
+      if (timeMatch) {
+        const hours = parseInt(timeMatch[1], 10);
+        const minutes = parseInt(timeMatch[2], 10);
+        
+        // Validate hours and minutes
+        if (hours >= 0 && hours < 24 && minutes >= 0 && minutes < 60) {
+          taskDate = taskDate.hour(hours).minute(minutes).second(0);
+          this.logger.log(`Time extracted from pattern "HH:MM": ${hours}:${minutes}`);
+          timeExtracted = true;
+        }
+      }
+      
+      // Check for "às XX horas" or "às XX" format
+      if (!timeExtracted) {
+        const hoursPattern = /[àa]s\s+(\d{1,2})(?:\s+horas?)?/i;
+        const hoursMatch = messageText.match(hoursPattern);
+        if (hoursMatch) {
+          const hours = parseInt(hoursMatch[1], 10);
+          if (hours >= 0 && hours < 24) {
+            taskDate = taskDate.hour(hours).minute(0).second(0);
+            this.logger.log(`Time extracted from "às XX horas" pattern: ${hours}:00`);
+            timeExtracted = true;
+          }
+        }
+      }
+      
+      // If no time was found in the message, keep the extracted time or default to noon
+      if (!timeExtracted) {
+        // If the scheduledDate already had a time component, preserve it
+        const originalHour = taskDate.hour();
+        const originalMinute = taskDate.minute();
+        
+        if (originalHour === 0 && originalMinute === 0) {
+          // If no time was in the original date, default to noon
+          taskDate = taskDate.hour(12).minute(0).second(0);
+          this.logger.log(`No time pattern found, defaulting to noon: 12:00`);
+        } else {
+          this.logger.log(`Preserving original time from date: ${originalHour}:${originalMinute}`);
+        }
+      }
+      
+      this.logger.log(`Final local date with time: ${taskDate.format('YYYY-MM-DD HH:mm:ss Z')}`);
+      
+      // Keep the date in local timezone when saving to database
       const utcDate = taskDate.toDate();
-      this.logger.log(`Data UTC: ${utcDate.toISOString()}`);
-
-      // Criar o compromisso
+      this.logger.log(`UTC date for database: ${utcDate.toISOString()}`);
+  
+      // Create the task
       const taskData = {
         userId,
-        title: newTaskInfo.title,
+        title: newTaskInfo.title || 'Compromisso',
         scheduledDate: utcDate,
         location: newTaskInfo.location,
         participants: newTaskInfo.participants,
@@ -595,11 +658,11 @@ export class WhatsappService {
       
       const newTask = await this.tasksService.createTask(taskData);
       
-      // Formatar a data para exibição usando o objeto dayjs original
+      // Format date for display using the original dayjs object
       const dateText = this.formatDateHumanized(taskDate);
       const timeText = this.formatTimeHumanized(taskDate);
       
-      // Gerar mensagem de confirmação
+      // Generate confirmation message
       let response = `Perfeito! Agendei ${newTask.title} para ${dateText} às ${timeText}`;
       
       if (newTask.location) {

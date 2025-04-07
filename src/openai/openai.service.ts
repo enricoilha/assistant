@@ -131,17 +131,25 @@ IMPORTANTE: Adapte sua interpretação ao contexto específico da mensagem, sem 
         messages: [
           {
             role: 'system',
-            content: `Você é um assistente que extrai informações de compromissos de mensagens.
-                      Extraia o máximo de informações possível, incluindo tipo de compromisso, data, hora,
-                      local e participantes. Formate sua resposta como JSON.
-                      
-                      IMPORTANTE: Preste muita atenção a atualizações de horário e datas. 
-                      Quando um usuário diz algo como "será às 12h, não às 13h", 
-                      o horário correto é 12h.
-                      
-                      Quando uma mensagem contém uma correção ou atualização, sempre 
-                      retorne a INFORMAÇÃO CORRETA/NOVA, nunca a informação original 
-                      que está sendo corrigida.`,
+            content: `Você é um assistente que extrai informações de compromissos de mensagens em português do Brasil.
+            Extraia o máximo de informações possível, incluindo tipo de compromisso, data, hora,
+            local e participantes. Formate sua resposta como JSON.
+            
+            IMPORTANTE SOBRE DATAS NO BRASIL:
+            
+            1. No Brasil, usamos o formato DD/MM/YYYY (dia/mês/ano), não MM/DD/YYYY.
+            2. Quando um usuário menciona apenas "dia X" (ex: "dia 7"), isso se refere ao dia X do MÊS ATUAL, não ao mês X.
+            3. Para expressões como "dia 7", use o dia 7 do mês atual, não o mês 7 (julho).
+            
+            IMPORTANTE SOBRE HORAS:
+            
+            1. Extraia o horário exato mencionado (ex: "19:15", "19h15", "às 19 horas").
+            2. Se o usuário mencionar um horário como "19:15", isso é 7:15 PM, não 19 horas e 15 minutos.
+            3. Quando um usuário diz algo como "será às 12h, não às 13h", o horário correto é 12h.
+            
+            Quando uma mensagem contém uma correção ou atualização, sempre 
+            retorne a INFORMAÇÃO CORRETA/NOVA, nunca a informação original 
+            que está sendo corrigida.`
           },
           {
             role: 'user',
@@ -375,45 +383,56 @@ IMPORTANTE: Adapte sua interpretação ao contexto específico da mensagem, sem 
     const formattedTime = today.toLocaleTimeString('pt-BR');
     
     return `
-Extraia informações de compromisso da seguinte mensagem em português. Hoje é ${formattedDate} e o horário atual é ${formattedTime}.
-Mensagem: "${message}"
-
-Extraia as seguintes informações e retorne-as como um objeto JSON:
-
-"action": A descrição ou tipo do compromisso (por exemplo, "Almoço", "Reunião", "Consulta")
-"dateTime": A data e hora em que o compromisso deve ocorrer (formato ISO)
-"location": O local do compromisso (se mencionado)
-"participants": Uma matriz de participantes (se mencionados)
-
-Diretrizes para interpretação:
-
-1. COMPROMISSOS: Identifique o tipo de compromisso mencionado na mensagem. Exemplos incluem "almoço", "jantar", "reunião", "consulta", mas não se limite a estes.
-
-2. HORÁRIOS: Interprete os horários conforme mencionados na mensagem. 
-   - Para expressões como "às 12h, não às 13h", interprete 12h como o horário correto
-   - Para expressões como "será amanhã às 16h e não hoje às 15h", interprete "amanhã às 16h" como correto
-   - Extraia o horário exato mencionado pelo usuário, sem assumir valores padrão
-
-3. ATUALIZAÇÕES: Em mensagens de atualização, extraia a NOVA informação correta, não a original.
-   Exemplo: "a reunião não será às 15h, mas sim às 16h" → extraia 16h como o horário
-
-4. PARTICIPANTES: Identifique os participantes mencionados na mensagem. Exemplos comuns incluem "família", "equipe", "financeiro", mas não se limite a estes.
-
-5. DATAS: Interprete as datas conforme o contexto da mensagem e o formato brasileiro (DD/MM/AAAA).
-   - Para expressões como "07/04", interprete como 7 de abril
-   - Para expressões como "dia 07/04", interprete como 7 de abril
-   - Para expressões como "07/04/2024", interprete como 7 de abril de 2024
-   - Para expressões como "07/04", NÃO assuma que é 4 de julho
-   - Para expressões que mencionam apenas dia e mês (ex: "07/04"), considere o ano atual
-   - Para expressões relativas como "amanhã", "próxima semana", "daqui a 3 dias", calcule a data correta com base na data atual
-
-6. HORÁRIOS NÃO ESPECIFICADOS: Se a mensagem não mencionar um horário específico, NÃO assuma um horário padrão.
-   Em vez disso, retorne null para o campo dateTime e adicione uma flag "needsTimeConfirmation: true"
-
-7. INTERPRETAÇÃO FLEXÍVEL: Adapte sua interpretação ao contexto específico da mensagem. Não aplique regras rígidas, mas considere o significado pretendido pelo usuário.
-
-IMPORTANTE: Extraia as informações exatamente como mencionadas pelo usuário, sem assumir valores padrão ou fazer interpretações rígidas. O objetivo é capturar a intenção do usuário com precisão.
-`;
+  Extraia informações de compromisso da seguinte mensagem em português do Brasil. Hoje é ${formattedDate} e o horário atual é ${formattedTime}.
+  Mensagem: "${message}"
+  
+  Extraia as seguintes informações e retorne-as como um objeto JSON:
+  
+  "action": A descrição ou tipo do compromisso (por exemplo, "Almoço", "Reunião", "Consulta")
+  "dateTime": A data e hora em que o compromisso deve ocorrer (formato ISO)
+  "location": O local do compromisso (se mencionado)
+  "participants": Uma matriz de participantes (se mencionados)
+  
+  Diretrizes para interpretação:
+  
+  1. COMPROMISSOS: Identifique o tipo de compromisso mencionado na mensagem. Se não houver tipo específico, use "Compromisso".
+  
+  2. HORÁRIOS: Interprete os horários exatamente como mencionados na mensagem.
+     - Para horários como "19:15" ou "19h15", use exatamente esse horário
+     - Para expressões como "às 12h, não às 13h", interprete 12h como o horário correto
+     - Para expressões como "será amanhã às 16h e não hoje às 15h", interprete "amanhã às 16h" como correto
+     - Extraia o horário exato mencionado pelo usuário, sem assumir valores padrão
+  
+  3. ATUALIZAÇÕES: Em mensagens de atualização, extraia a NOVA informação correta, não a original.
+     Exemplo: "a reunião não será às 15h, mas sim às 16h" → extraia 16h como o horário
+  
+  4. PARTICIPANTES: Identifique os participantes mencionados na mensagem. Exemplos comuns incluem "família", "equipe", "financeiro", mas não se limite a estes.
+  
+  5. DATAS BRASILEIRAS: No Brasil usamos o formato DD/MM/AAAA. Isso é crítico para interpretar datas corretamente.
+     - Para expressões como "07/04", interprete como 7 de abril (dia 7 do mês 4), NÃO como 4 de julho
+     - Para expressões como "dia 7", interprete como dia 7 do MÊS ATUAL, NÃO como mês 7 (julho)
+     - Para expressões como "07/04/2024", interprete como 7 de abril de 2024
+     - Para expressões que mencionam apenas dia (ex: "dia 15"), considere o mês e ano atuais
+     - Para expressões relativas como "amanhã", "próxima semana", "daqui a 3 dias", calcule a data correta com base na data atual
+  
+  6. MENSAGENS AMBÍGUAS: Se a mensagem não mencionar claramente uma data ou horário específico, não assuma valores.
+     Em vez disso, retorne null para o campo dateTime e adicione uma flag "needsTimeConfirmation: true"
+  
+  7. PROCESSAMENTO DE "DIA X": Quando o usuário menciona apenas "dia X" (ex: "dia 7", "dia 15"):
+     - Isso SEMPRE se refere ao dia X do MÊS ATUAL (não ao mês X)
+     - Nunca interprete "dia 7" como julho (mês 7)
+     - Para "dia 7", a data correta é 7 do mês atual (7 de abril de 2025, se hoje é ${formattedDate})
+  
+  EXEMPLO IMPORTANTE:
+  Para a mensagem "Agende um compromisso para dia 7 19:15 no embuscadaverdade"
+  A interpretação correta é:
+  - action: "Compromisso"
+  - dateTime: "2025-04-07T19:15:00" (7 de abril de 2025 às 19:15) - assumindo que hoje é ${formattedDate}
+  - location: "embuscadaverdade"
+  - participants: null ou []
+  
+  IMPORTANTE: Extraia as informações com precisão, seguindo rigorosamente o formato de data brasileiro (DD/MM/AAAA).
+  `;
   }
   
   /**

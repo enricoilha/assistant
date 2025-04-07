@@ -25,7 +25,8 @@ export class TasksService {
         location, 
         participants 
       } = createTaskDto;
-
+  
+      this.logger.log(`Creating task with date: ${scheduledDate.toISOString()}`);
       
       // Insert task into the database
       const { data, error } = await this.supabaseService.client
@@ -35,7 +36,7 @@ export class TasksService {
             user_id: userId,
             title,
             description,
-            scheduled_date: scheduledDate.toLocaleDateString('pt-BR'),
+            scheduled_date: scheduledDate.toISOString(), // Store in ISO format to preserve time
             location,
             participants,
             status: 'pending',
@@ -43,12 +44,12 @@ export class TasksService {
         ])
         .select()
         .single();
-
+  
       if (error) {
         this.logger.error(`Error creating task: ${error.message}`, error);
         throw new Error(`Failed to create task: ${error.message}`);
       }
-
+  
       return this.mapDbTaskToEntity(data);
     } catch (error) {
       this.logger.error(`Error in createTask: ${error.message}`, error.stack);
